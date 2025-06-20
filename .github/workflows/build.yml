@@ -1,26 +1,66 @@
-name: Build
+name: Build, Analyze, Scan
 
 on:
   push:
     branches:
       - main
 
-
 jobs:
-  build:
-    name: Build
+  build-analyze-scan:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout code
+        uses: actions/checkout@v2
         with:
-          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
-      - uses: sonarsource/sonarqube-scan-action@master
+          fetch-depth: 0
+
+      - name: Build and analyze with SonarQube
+        uses: sonarsource/sonarqube-scan-action@master
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-      # If you wish to fail your job when the Quality Gate is red, uncomment the
-      # following lines. This would typically be used to fail a deployment.
-      # - uses: sonarsource/sonarqube-quality-gate-action@master
-      #   timeout-minutes: 5
-      #   env:
-      #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: npm install dependencies
+        run: npm install
+
+      - name: Install Trivy via APT
+        run: |
+          sudo apt-get update
+          sudo apt-get install wget gnupg lsb-release -y
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy -y
+
+      - name: Verify Trivy Installed
+        run: trivy --version
+
+      - name: Trivy file scan
+        run: trivy fs . > trivyfs.txt
+
+      - name: Docker Build and push
+        run: |
+          docker build -t candycrush .
+          docker tag candycrush meet2005/candycrush:latest
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+          docker push meet2005/candycrush:latest
+        env:
+          DOCKER_CLI_ACI: 1
+
+      - name: Trivy image scan
+        run: trivy image meet2005/candycrush:latest > trivyimage.txt
+
+  deploy:
+    needs: build-analyze-scan
+    runs-on: [self-hosted, Linux, X64]
+
+    steps:
+      - name: Pull Docker image
+        run: docker pull meet2005/candycrush:latest
+
+      - name: Trivy image scan (deploy)
+        run: trivy image meet2005/candycrush:latest > trivyimagedeploy.txt
+
+      - name: Run container
+        run: docker run -d --name game -p 3000:3000 meet2005/candycrush:latest
